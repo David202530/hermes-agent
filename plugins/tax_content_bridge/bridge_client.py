@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import uuid
 from typing import Optional
+from urllib.parse import urlsplit
 
 import requests
 
@@ -18,6 +19,7 @@ from agent.secret_scope import get_secret
 from gateway.session_context import get_session_env
 
 _TIMEOUT_SECONDS = 15
+_LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
 
 
 class BridgeError(Exception):
@@ -26,16 +28,49 @@ class BridgeError(Exception):
     propagate as a raw traceback into the agent's context."""
 
 
+def _is_valid_bridge_url(url: str) -> bool:
+    """HTTPS required for any real (non-local) bridge URL -- a plain http
+    tunnel would leak the shared secret and every action payload. http is
+    only ever accepted for localhost/127.0.0.1 (same-machine dev, no
+    network hop)."""
+    if not url:
+        return False
+    try:
+        parsed = urlsplit(url)
+    except ValueError:
+        return False
+    if not parsed.netloc:
+        return False
+    if parsed.scheme == "https":
+        return True
+    return parsed.scheme == "http" and parsed.hostname in _LOCAL_HOSTS
+
+
+def _is_valid_chat_id(chat_id: str) -> bool:
+    return bool(chat_id) and chat_id.isdigit()
+
+
 def is_configured() -> bool:
-    return bool(get_secret("TAX_AGENT_BRIDGE_URL", "")) and bool(
-        get_secret("TAX_AGENT_BRIDGE_SHARED_SECRET", "")
-    )
+    """True only when EVERY value required for a correct round trip is
+    present and valid -- inbound tool calls need the URL + secret, but
+    outbound delivery (the poller) also needs TAX_AGENT_BRIDGE_CHAT_ID.
+    Gating the tools on the URL/secret alone would let David approve
+    actions that appear to succeed while the resulting event silently never
+    reaches him -- so all three are required here, not just the two the
+    inbound path itself touches."""
+    url = get_secret("TAX_AGENT_BRIDGE_URL", "") or ""
+    secret = get_secret("TAX_AGENT_BRIDGE_SHARED_SECRET", "") or ""
+    chat_id = get_secret("TAX_AGENT_BRIDGE_CHAT_ID", "") or ""
+    return _is_valid_bridge_url(url) and bool(secret) and _is_valid_chat_id(chat_id)
 
 
 def _base_url() -> str:
     url = get_secret("TAX_AGENT_BRIDGE_URL", "") or ""
-    if not url:
-        raise BridgeError("TAX_AGENT_BRIDGE_URL is not configured on this Hermes instance")
+    if not _is_valid_bridge_url(url):
+        raise BridgeError(
+            "TAX_AGENT_BRIDGE_URL is not configured or is not a valid HTTPS URL "
+            "(http is only accepted for localhost/127.0.0.1)"
+        )
     return url.rstrip("/")
 
 
