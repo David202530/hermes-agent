@@ -1,0 +1,17 @@
+name: tax-content-bridge
+version: 1.0.0
+description: "Tax Content Intelligence Agent bridge -- 11 tools that let David manage tax-topic research, drafts, revisions, and final-package approval through this Hermes conversation. Every tool forwards to the Tax Agent's own allowlisted action_gateway over an authenticated HTTPS bridge; no tax reasoning, Writer, approval, or Publisher logic lives here. Requires TAX_AGENT_BRIDGE_URL / TAX_AGENT_BRIDGE_SHARED_SECRET / TAX_AGENT_BRIDGE_CHAT_ID -- inert (tools registered but dispatch refused with a clear error) until all three are configured. LinkedIn publishing is not exposed by this plugin."
+author: "David Mamrikishvili"
+kind: backend
+provides_tools:
+  - tax_agent_status
+  - tax_agent_get_workflow_status
+  - tax_agent_list_topics
+  - tax_agent_select_topic
+  - tax_agent_research_more
+  - tax_agent_ask_about_case
+  - tax_agent_accept_draft
+  - tax_agent_request_text_revision
+  - tax_agent_request_visual_revision
+  - tax_agent_request_combined_revision
+  - tax_agent_approve_final_package
