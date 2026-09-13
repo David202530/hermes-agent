@@ -20,21 +20,8 @@ Inert until configured: TAX_AGENT_BRIDGE_URL, TAX_AGENT_BRIDGE_SHARED_SECRET,
 and TAX_AGENT_BRIDGE_CHAT_ID must all be set (see plugin.yaml) or every
 tool call and the background poller both fail closed with a clear error /
 idle quietly, never a crash or a silent fallback.
-
-Tools are registered in every process that discovers plugins (gateway,
-and `hermes serve` when a dashboard request happens to trigger discovery --
-see gateway/run.py and hermes_cli/web_server.py), so introspection/UI
-surfaces see this plugin consistently everywhere. The background poller is
-different: it is a single outbound network loop that must run exactly once
-per deployment, not once per process. HERMES_GATEWAY_PROCESS is set by
-gateway/run.py before it discovers plugins, specifically so this plugin
-(and any other with a similar background loop) can tell it is running
-inside the one process that owns Telegram/cron/external polling, and
-start its poller only there.
 """
 from __future__ import annotations
-
-import os
 
 from . import tools
 from .poller import start_poller
@@ -70,5 +57,4 @@ def register(ctx) -> None:
             check_fn=check_bridge_configured,
             emoji=emoji,
         )
-    if os.environ.get("HERMES_GATEWAY_PROCESS") == "1":
-        start_poller()
+    start_poller()
