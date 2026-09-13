@@ -261,6 +261,105 @@ class TestPollOnceDuplicateSafety:
 
 
 # ---------------------------------------------------------------------------
+# Poller ownership: exactly one poller per deployment, not one per process
+# ---------------------------------------------------------------------------
+# `discover_plugins()` runs in more than one long-lived process in
+# production: unconditionally in gateway/run.py at Gateway startup, and as
+# a side effect of two `hermes serve` dashboard API handlers (rendering the
+# Channels settings page, and the terminal-backend picker -- see
+# hermes_cli/web_server.py). register()'s tool registration is meant to
+# run in every such process (so dashboard/UI surfaces see the plugin
+# consistently); the background poller thread is not -- it is a single
+# outbound network loop that must run once per deployment. gateway/run.py
+# sets HERMES_GATEWAY_PROCESS=1 before it discovers plugins specifically so
+# register() can tell the two situations apart.
+
+class _FakeCtx:
+    def __init__(self):
+        self.registered: list[str] = []
+
+    def register_tool(self, *, name, toolset, schema, handler, check_fn, emoji):
+        self.registered.append(name)
+
+
+class TestPollerOwnership:
+    def test_gateway_process_starts_the_poller(self, monkeypatch):
+        _load_module("bridge_client")  # ensures the package __init__ has run
+        pkg = sys.modules["hermes_plugins.tax_content_bridge"]
+        started = []
+        monkeypatch.setattr(pkg, "start_poller", lambda: started.append(True))
+        monkeypatch.setenv("HERMES_GATEWAY_PROCESS", "1")
+
+        pkg.register(_FakeCtx())
+
+        assert started == [True]
+
+    def test_non_gateway_process_does_not_start_a_second_poller(self, monkeypatch):
+        _load_module("bridge_client")
+        pkg = sys.modules["hermes_plugins.tax_content_bridge"]
+        started = []
+        monkeypatch.setattr(pkg, "start_poller", lambda: started.append(True))
+        monkeypatch.delenv("HERMES_GATEWAY_PROCESS", raising=False)
+
+        pkg.register(_FakeCtx())
+
+        assert started == [], "hermes serve (or any non-Gateway process) must not poll Tax Agent"
+
+    def test_tools_register_regardless_of_process_role(self, monkeypatch):
+        # The fix must not make tool visibility depend on HERMES_GATEWAY_PROCESS
+        # -- only the poller thread is process-role-gated.
+        _load_module("bridge_client")
+        pkg = sys.modules["hermes_plugins.tax_content_bridge"]
+        monkeypatch.setattr(pkg, "start_poller", lambda: None)
+        monkeypatch.delenv("HERMES_GATEWAY_PROCESS", raising=False)
+
+        ctx = _FakeCtx()
+        pkg.register(ctx)
+
+        assert len(ctx.registered) == 11
+        assert "tax_agent_select_topic" in ctx.registered
+
+    def test_repeated_registration_in_the_same_gateway_process_starts_only_one_poller(self, monkeypatch):
+        # A profile/config reload can trigger a second discover_and_load()
+        # pass in the same long-lived Gateway process. start_poller()'s own
+        # module-level _started guard must keep that idempotent.
+        pl = _load_module("poller")
+        pkg = sys.modules["hermes_plugins.tax_content_bridge"]
+        monkeypatch.setenv("HERMES_GATEWAY_PROCESS", "1")
+        monkeypatch.setattr(pl, "_started", False)
+
+        thread_starts = []
+        monkeypatch.setattr(
+            pl.threading, "Thread",
+            lambda target, name, daemon: types.SimpleNamespace(start=lambda: thread_starts.append(True)),
+        )
+
+        pkg.register(_FakeCtx())
+        pkg.register(_FakeCtx())
+
+        assert len(thread_starts) == 1
+
+    def test_poller_starts_again_after_a_fresh_process_import(self, monkeypatch):
+        # Simulates a Gateway restart: a brand-new process re-imports the
+        # plugin from scratch, so module-level state (_started) is fresh --
+        # the poller must still start there, exactly once.
+        package_name = "hermes_plugins.tax_content_bridge"
+        for mod_name in list(sys.modules):
+            if mod_name == package_name or mod_name.startswith(package_name + "."):
+                del sys.modules[mod_name]
+
+        monkeypatch.setenv("HERMES_GATEWAY_PROCESS", "1")
+        _load_module("bridge_client")
+        pkg = sys.modules[package_name]
+        started = []
+        monkeypatch.setattr(pkg, "start_poller", lambda: started.append(True))
+
+        pkg.register(_FakeCtx())
+
+        assert started == [True]
+
+
+# ---------------------------------------------------------------------------
 # Real PluginManager discovery -- kind: backend must auto-load, no opt-in
 # ---------------------------------------------------------------------------
 

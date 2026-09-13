@@ -12887,6 +12887,17 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             self._request_clean_exit(reason)
             return True
         
+        # Mark this process as the one long-lived Gateway process before
+        # plugin discovery runs, so a plugin's register() can tell whether
+        # it is loading inside the Gateway (owns Telegram/cron/external
+        # polling) or some other process (e.g. `hermes serve`, which also
+        # triggers discover_plugins() as a side effect of a couple of
+        # dashboard API handlers -- see hermes_cli/web_server.py). Without
+        # this, a plugin with a background poller/thread that starts
+        # unconditionally in register() ends up running once per process
+        # that happens to discover plugins, not once per deployment.
+        os.environ["HERMES_GATEWAY_PROCESS"] = "1"
+
         # Discover Python plugins before shell hooks so plugin block
         # decisions take precedence in tie cases.  The CLI startup path
         # does this via an explicit call in hermes_cli/main.py; the
