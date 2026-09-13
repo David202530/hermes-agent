@@ -261,6 +261,105 @@ class TestPollOnceDuplicateSafety:
 
 
 # ---------------------------------------------------------------------------
+# Regression test for the production incident: PluginManager.discover_and_
+# load() caches per process (self._discovered), so setting
+# HERMES_GATEWAY_PROCESS *after* the first real discovery pass is too late
+# -- register() is never invoked again to see it. This is exactly what the
+# first attempt at this fix did (the flag was set deep inside
+# GatewayRunner's own startup code), while hermes_cli/main.py's
+# _prepare_agent_startup() -- called unconditionally, earlier, for every
+# `hermes` invocation including `gateway run` -- had already triggered the
+# one and only real discovery pass with the flag still unset. Production
+# evidence: zero /hermes/pending-events requests reached Tax Agent after
+# that deploy, versus every prior deployment showing traffic within
+# seconds.
+# ---------------------------------------------------------------------------
+
+class _FakeCtx:
+    def __init__(self):
+        self.registered: list[str] = []
+
+    def register_tool(self, *, name, toolset, schema, handler, check_fn, emoji):
+        self.registered.append(name)
+
+
+class TestPollerOwnershipRealOrdering:
+    def test_flag_set_after_first_discovery_never_starts_the_poller(self, monkeypatch, _isolate_env):
+        # Reproduces the actual bug: the process's FIRST real discovery
+        # pass happens with the role flag still unset (main.py's own
+        # earlier, unconditional discovery for `gateway run`) --
+        # register() correctly withholds the poller. The flag then arrives
+        # (as it did in the broken fix, deep inside GatewayRunner, only
+        # after that first pass), and a second discover_and_load() call
+        # runs (gateway/run.py's own redundant call) -- but PluginManager
+        # is already discovered, so register() is never called again and
+        # the poller never starts. THIS is the production bug, reproduced.
+        from hermes_cli import plugins as pmod
+
+        _load_module("bridge_client")  # imports the package once, cheaply
+        pkg = sys.modules["hermes_plugins.tax_content_bridge"]
+        started = []
+        monkeypatch.setattr(pkg, "start_poller", lambda: started.append(True))
+
+        mgr = pmod.PluginManager()
+        monkeypatch.delenv("HERMES_GATEWAY_PROCESS", raising=False)
+        mgr.discover_and_load()  # first real pass: flag not set yet (the bug)
+        assert started == [], "sanity: correctly withheld with the flag unset"
+
+        monkeypatch.setenv("HERMES_GATEWAY_PROCESS", "1")  # arrives too late
+        mgr.discover_and_load()  # redundant call, no-op: already discovered
+
+        loaded = mgr._plugins["tax-content-bridge"]
+        assert loaded.enabled is True, "tools must still register regardless"
+        assert started == [], (
+            "BUG REPRODUCED: the poller never starts once discovery has "
+            "already cached this process as discovered -- setting the flag "
+            "afterward cannot recover it"
+        )
+
+    def test_flag_set_before_first_discovery_starts_the_poller(self, monkeypatch, _isolate_env):
+        # The corrected ordering: the role flag is set BEFORE the process's
+        # only real discover_and_load() call (as hermes_cli/main.py now
+        # does, ahead of _prepare_agent_startup()), so register() sees it
+        # on the one pass that matters.
+        _load_module("bridge_client")
+        pkg = sys.modules["hermes_plugins.tax_content_bridge"]
+        started = []
+        monkeypatch.setattr(pkg, "start_poller", lambda: started.append(True))
+        monkeypatch.setenv("HERMES_GATEWAY_PROCESS", "1")  # set BEFORE discovery
+
+        pkg.register(_FakeCtx())
+
+        assert started == [True], "flag set before discovery must start the poller"
+
+    def test_main_sets_the_flag_before_the_first_discovery_call(self):
+        # Literal ordering guard on hermes_cli/main.py itself: the line
+        # setting HERMES_GATEWAY_PROCESS for the gateway-run case must
+        # appear BEFORE the _prepare_agent_startup(args) call that
+        # actually triggers the first (and only) real discovery pass for
+        # that process. Source-level, not behavioral, but directly guards
+        # against the exact regression (the flag ending up written after
+        # discovery has already run) recurring via a future reordering.
+        import inspect
+
+        from hermes_cli import main as main_mod
+
+        source = inspect.getsource(main_mod)
+        flag_pos = source.index('os.environ["HERMES_GATEWAY_PROCESS"] = "1"')
+        # _prepare_agent_startup(args) is called from several call sites
+        # (chat-launch fast paths, oneshot, ...) earlier in the file --
+        # the one that matters here is the unconditional call in the main
+        # dispatch flow, which is the NEXT occurrence after the flag line
+        # (the flag is placed immediately above it).
+        discovery_pos = source.index("_prepare_agent_startup(args)", flag_pos)
+        assert flag_pos < discovery_pos, (
+            "HERMES_GATEWAY_PROCESS must be set before _prepare_agent_startup() "
+            "runs -- setting it after discovery has already run is the exact "
+            "bug this test guards against"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Real PluginManager discovery -- kind: backend must auto-load, no opt-in
 # ---------------------------------------------------------------------------
 

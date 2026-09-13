@@ -14630,6 +14630,24 @@ def main():
     if getattr(args, "yolo", False):
         os.environ["HERMES_YOLO_MODE"] = "1"
 
+    # Mark this as the one long-lived Gateway process *before* plugin
+    # discovery runs, for the same reason --yolo is set before it above:
+    # _prepare_agent_startup() below is what actually triggers
+    # discover_plugins() for `hermes gateway run` (via
+    # start_background_plugin_discovery(), gated through
+    # _AGENT_SUBCOMMANDS["gateway"]), and PluginManager.discover_and_load()
+    # caches its result per process (self._discovered). A plugin's
+    # register() reading this flag to decide whether to start a
+    # background poller/thread must see it set on THIS, the first and
+    # only real discovery pass for the Gateway process -- setting it
+    # later (e.g. deep inside GatewayRunner's own startup, after this
+    # call) is too late: discovery has already run and register() will
+    # not be called again -- a prior attempt set this flag inside
+    # GatewayRunner instead of here, and the poller never started in
+    # production as a result.
+    if args.command == "gateway" and getattr(args, "gateway_command", None) == "run":
+        os.environ["HERMES_GATEWAY_PROCESS"] = "1"
+
     # Discover Python plugins and register shell hooks once, before any
     # command that can fire lifecycle hooks.  Both are idempotent; gated
     # so introspection/management commands (hermes hooks list, cron
