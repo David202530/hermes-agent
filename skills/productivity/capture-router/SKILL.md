@@ -54,6 +54,21 @@ This skill also handles two other message shapes from the same six-item
 vocabulary — see **Read-only queries** and **Update commands** below —
 but capture (this section) is the primary path.
 
+## Integration mode: agent-mediated live chat skill only
+
+**Capture Router v1 integration: AGENT-MEDIATED LIVE CHAT SKILL.** This
+is a deliberate architectural decision, not a placeholder:
+
+- **No cron job.** This skill is never scheduled — it only runs inside
+  the conversational session, triggered by the message that invoked it.
+- **No gateway hook.** It is not wired into `gateway/run.py`'s
+  `pre_gateway_dispatch` or any other message-interception point.
+- **No automatic classification of ordinary conversation.** The
+  conversational agent invokes this skill only when a message starts
+  with one of the six explicit prefixes, or matches one of the explicit
+  query/update command shapes below. Everything else is unaffected,
+  full stop.
+
 ## Read-only guarantee for queries
 
 `Backlog` / `My backlog` / `Show HIGH priority` / `Show Tax research` /
@@ -158,11 +173,34 @@ confirming the change, or "No such item: BL-xxxx" if `found` is false.
 
 ## Persistence
 
-v1 uses `BACKLOG.md` only — no SQLite. `PROJECTS.md` is **read** for the
-current project list (never written by this skill except when the user
-explicitly asks to update project-level metadata, which is a separate,
-manual edit outside this skill's scope — this skill only appends/updates
-items in `BACKLOG.md`).
+v1 uses `BACKLOG.md` only — no SQLite. `PROJECTS.md` is **read-only**:
+this skill reads it for the current project list and **never** writes
+to it, under any circumstance — updating a project's own status/next
+action in `PROJECTS.md` is a separate, manual edit entirely outside
+this skill's scope.
+
+`BACKLOG.md` is the intended persistent **mutable** store — that is the
+whole point of this skill. Concretely, by default (no explicit
+`--projects-path`/`--backlog-path` override):
+
+- The script resolves `$HERMES_HOME/context/PROJECTS.md` (read) and
+  `$HERMES_HOME/context/BACKLOG.md` (read + write).
+- **In production, `HERMES_HOME=/opt/data`, so this resolves to
+  `/opt/data/context/BACKLOG.md` — the canonical, live backlog store.**
+  This skill *does* write there in production; that is by design, not
+  an oversight.
+- The local workspace's `memory/BACKLOG.md` is a **development/mirror/
+  seed file only** — it is what this skill was built and tested
+  against locally, and what a one-time seed (see the project's
+  production-seeding plan, tracked outside this skill) may copy into
+  `/opt/data/context/BACKLOG.md` before first production use. It is
+  **not** a separate live source of truth, and it is **not**
+  automatically synchronized with the production file in either
+  direction after that seed — a local edit does not appear in
+  production, and a production capture does not appear locally, unless
+  someone explicitly pulls/pushes it (the same manual-sync convention
+  already used for `PROJECTS.md`/`CURRENT_STATE.md` — see
+  `memory/README.md`).
 
 Every write is append-only (new capture) or single-field, full-file
 re-render (status/priority update) via an atomic temp-file-then-replace,
@@ -170,9 +208,10 @@ so a crash mid-write can never corrupt or truncate existing entries.
 IDs are `BL-0001`, `BL-0002`, … — strictly increasing, never reused,
 computed from the highest existing ID already in the file.
 
-**This skill never writes to `/opt/data/context/` in this phase.**
-Paths are explicit arguments/derived from `HERMES_HOME` — sync to the
-deployed context store is a deliberate future step, not automatic.
+No path is ever hardcoded to a literal `/opt/data` string in the
+script — production behavior falls out entirely from `HERMES_HOME`
+already being set to `/opt/data` in that environment, the same
+mechanism every other Hermes skill and cron job relies on.
 
 ## Verification
 
@@ -184,4 +223,7 @@ deployed context store is a deliberate future step, not automatic.
 - [ ] `PROJECTS.md` was only ever read, never written, by this skill.
 - [ ] `BACKLOG.md`'s existing entries (including `BL-0001`) were
       preserved byte-for-byte other than the one intended change.
-- [ ] No write touched `/opt/data/context/`.
+- [ ] In production the write landed in `/opt/data/context/BACKLOG.md`
+      (the canonical store) — this is expected, not a leak. What must
+      never happen is a write anywhere else: `PROJECTS.md`, a hardcoded
+      path bypassing `HERMES_HOME`, or any file other than `BACKLOG.md`.

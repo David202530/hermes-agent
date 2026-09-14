@@ -409,7 +409,15 @@ def test_source_file_never_writes_projects_md():
 
 
 # ---------------------------------------------------------------------------
-# 16. No /opt/data/context mutation
+# 16. Persistence contract: production DOES write to
+# $HERMES_HOME/context/BACKLOG.md (which is /opt/data/context/BACKLOG.md
+# in production, since HERMES_HOME=/opt/data there) -- that is the
+# intended canonical store, not a leak. What must be guarded instead:
+# no path is hardcoded to a literal /opt/data string (production behavior
+# must fall out of HERMES_HOME resolution, the same as every other
+# skill/cron job), the script writes only BACKLOG.md and never
+# PROJECTS.md, an explicit custom path still overrides the default for
+# local/test use, and writes stay atomic.
 # ---------------------------------------------------------------------------
 
 def test_source_file_never_hardcodes_opt_data_as_a_path_default():
@@ -422,12 +430,85 @@ def test_source_file_never_hardcodes_opt_data_as_a_path_default():
     assert "Path('/opt/data" not in source
 
 
-def test_default_paths_are_derived_not_hardcoded_to_opt_data():
-    # main()'s defaults must be derived from HERMES_HOME, not a literal
-    # /opt/data path, so tests/dev runs never accidentally target it.
+def test_default_paths_are_derived_from_hermes_home(monkeypatch, tmp_path):
+    # 1. Default paths derive from HERMES_HOME -- with it set to a fake
+    # "/opt/data"-shaped tmp_path, the script must resolve under it,
+    # proving production's real HERMES_HOME=/opt/data would resolve to
+    # /opt/data/context/BACKLOG.md through this exact mechanism.
     source = SCRIPT_PATH.read_text(encoding="utf-8")
     assert '_default_home()' in source
     assert 'os.environ.get("HERMES_HOME"' in source
+
+    m = _load_module()
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    home = m._default_home()
+    assert home == tmp_path
+    # main()'s own default-path construction (mirrored here since main()
+    # itself is argv-driven): $HERMES_HOME/context/{PROJECTS,BACKLOG}.md.
+    assert (home / "context" / "BACKLOG.md") == tmp_path / "context" / "BACKLOG.md"
+
+
+def test_capture_writes_only_backlog_md_and_nothing_else(tmp_path, projects_path):
+    # 2. Capture writes ONLY BACKLOG.md -- create a handful of sibling
+    # files first and confirm none of them change.
+    backlog_path = tmp_path / "BACKLOG.md"
+    sentinel_files = {
+        tmp_path / "CURRENT_STATE.md": "unrelated content\n",
+        tmp_path / "SOUL.md": "unrelated content\n",
+    }
+    for path, content in sentinel_files.items():
+        path.write_text(content, encoding="utf-8")
+
+    m = _load_module()
+    m.capture(
+        "Idea: something new", projects_path=projects_path, backlog_path=backlog_path,
+        created="2026-09-14", source="Telegram",
+    )
+
+    assert backlog_path.exists()  # the one file that SHOULD change
+    for path, original in sentinel_files.items():
+        assert path.read_text(encoding="utf-8") == original
+
+
+def test_explicit_custom_path_overrides_default_for_local_test_use(tmp_path):
+    # 4. An explicit --backlog-path/--projects-path (or the equivalent
+    # keyword args) must still work for local/test validation, regardless
+    # of HERMES_HOME. This is exactly how this test suite -- and the
+    # manual Step 12 validation -- runs against scratch copies instead of
+    # touching /opt/data/context.
+    m = _load_module()
+    custom_projects = tmp_path / "custom" / "PROJECTS.md"
+    custom_backlog = tmp_path / "custom" / "BACKLOG.md"
+    custom_projects.parent.mkdir(parents=True)
+    custom_projects.write_text("| # | Project | Priority | Status | Next action |\n", encoding="utf-8")
+
+    result = m.capture(
+        "Idea: custom path test", projects_path=custom_projects, backlog_path=custom_backlog,
+        created="2026-09-14", source="Telegram",
+    )
+    assert result["matched"] is True
+    assert custom_backlog.exists()
+    assert not (tmp_path / "context").exists()  # never silently fell back to a default
+
+
+def test_atomic_write_leaves_no_temp_file_behind(tmp_path):
+    # 6. Atomic writes remain intact: append_entry/_atomic_write must go
+    # through a temp-file-then-replace, and no .tmp artifact should
+    # survive a successful write.
+    m = _load_module()
+    backlog_path = tmp_path / "BACKLOG.md"
+    entry = m.BacklogEntry(
+        id="BL-0001", type="IDEA", domain="Tax", project="UNASSIGNED",
+        title="x", priority="MEDIUM", status="BACKLOG", next_action="x",
+        created="2026-09-14", source="Telegram",
+    )
+    m.append_entry(backlog_path, entry)
+    assert backlog_path.exists()
+    assert not backlog_path.with_suffix(backlog_path.suffix + ".tmp").exists()
+
+    source = SCRIPT_PATH.read_text(encoding="utf-8")
+    assert "def _atomic_write" in source
+    assert ".replace(path)" in source  # Path.replace -- atomic on POSIX and Windows
 
 
 # ---------------------------------------------------------------------------
