@@ -11,6 +11,7 @@ fixtures only; no test ever touches the real memory/ files or
 from __future__ import annotations
 
 import importlib.util
+import inspect
 import sys
 from pathlib import Path
 
@@ -542,3 +543,129 @@ def test_duplicate_notice_is_concise():
     notice = m.render_duplicate_notice("BL-0001")
     assert notice.startswith("Possible duplicate of BL-0001")
     assert len(notice.splitlines()) == 1
+
+
+# ---------------------------------------------------------------------------
+# Phase 2B-D: query action hints (rendering-only, no persistence/routing change)
+# ---------------------------------------------------------------------------
+
+def _entry(status: str, entry_id: str = "BL-0002") -> "object":
+    m = _load_module()
+    return m.BacklogEntry(
+        id=entry_id, type="IDEA", domain="Tax", project="UNASSIGNED",
+        title="Test Capture Router production persistence", priority="MEDIUM",
+        status=status, next_action="x", created="2026-09-14", source="Telegram",
+    )
+
+
+def test_backlog_item_shows_start_done_cancel_hint():
+    m = _load_module()
+    rendered = m.render_query_results([_entry("BACKLOG")])
+    assert "Reply: Start BL-0002 · Done BL-0002 · Cancel BL-0002" in rendered
+
+
+def test_ready_item_shows_start_done_cancel_hint():
+    # Not explicitly named in the spec's four examples, but READY is the
+    # same "not yet started" family as BACKLOG.
+    m = _load_module()
+    rendered = m.render_query_results([_entry("READY")])
+    assert "Reply: Start BL-0002 · Done BL-0002 · Cancel BL-0002" in rendered
+
+
+def test_in_progress_item_shows_done_cancel_only():
+    m = _load_module()
+    rendered = m.render_query_results([_entry("IN_PROGRESS")])
+    assert "Reply: Done BL-0002 · Cancel BL-0002" in rendered
+    assert "Start BL-0002" not in rendered
+
+
+def test_waiting_item_shows_done_cancel_only():
+    # Not explicitly named in the spec's four examples, but WAITING is the
+    # same "already active" family as IN_PROGRESS -- Start no longer applies.
+    m = _load_module()
+    rendered = m.render_query_results([_entry("WAITING")])
+    assert "Reply: Done BL-0002 · Cancel BL-0002" in rendered
+    assert "Start BL-0002" not in rendered
+
+
+def test_done_item_shows_no_action_hint():
+    m = _load_module()
+    rendered = m.render_query_results([_entry("DONE")])
+    assert "Reply:" not in rendered
+
+
+def test_cancelled_item_shows_no_action_hint():
+    m = _load_module()
+    rendered = m.render_query_results([_entry("CANCELLED")])
+    assert "Reply:" not in rendered
+
+
+def test_correct_bl_id_appears_in_every_hint():
+    m = _load_module()
+    rendered = m.render_query_results([_entry("BACKLOG", entry_id="BL-0042")])
+    assert "Start BL-0042" in rendered
+    assert "Done BL-0042" in rendered
+    assert "Cancel BL-0042" in rendered
+    assert "BL-0002" not in rendered  # no cross-contamination from the default entry_id
+
+
+def test_render_query_results_is_multi_item_and_empty_safe():
+    m = _load_module()
+    assert m.render_query_results([]) == "No matching backlog items."
+    rendered = m.render_query_results([_entry("BACKLOG", "BL-0001"), _entry("DONE", "BL-0002")])
+    assert "Start BL-0001" in rendered
+    assert "Reply:" in rendered  # from BL-0001
+    assert rendered.count("Reply:") == 1  # BL-0002 (DONE) contributes none
+
+
+def test_hint_derived_only_from_id_and_status_no_free_form_interpolation():
+    # Static guard: the hint helper must never read entry.title/notes/etc.
+    m = _load_module()
+    source = inspect.getsource(m._action_hint_line)
+    assert "entry.title" not in source
+    assert "entry.notes" not in source
+    assert "eval(" not in source
+    assert "exec(" not in source
+    assert "subprocess" not in source
+    assert "open(" not in source
+
+
+def test_query_results_never_call_append_entry_or_update_entry_field():
+    # Static guard: rendering must stay read-only -- no accidental call
+    # into a persistence function from the rendering path.
+    m = _load_module()
+    source = inspect.getsource(m.render_query_results)
+    assert "append_entry(" not in source
+    assert "update_entry_field(" not in source
+
+
+def test_query_results_reflect_apply_query_output_without_mutation(backlog_path):
+    # End-to-end read path: parse -> filter -> render, confirming BACKLOG.md
+    # is untouched by the whole chain.
+    m = _load_module()
+    before = backlog_path.read_text(encoding="utf-8")
+    entries = m.parse_backlog(before)
+    filtered = m.apply_query(entries, m.parse_query("Backlog"))
+    rendered = m.render_query_results(filtered)
+    assert "BL-0001" in rendered
+    after = backlog_path.read_text(encoding="utf-8")
+    assert before == after
+
+
+def test_projects_md_unchanged_by_query_rendering(projects_path):
+    m = _load_module()
+    before = projects_path.read_text(encoding="utf-8")
+    m.render_query_results([_entry("BACKLOG")])
+    after = projects_path.read_text(encoding="utf-8")
+    assert before == after  # render_query_results doesn't even take a path
+
+
+def test_parse_update_command_and_update_entry_field_unchanged_by_this_change():
+    # Static guard: this phase must not touch persistence/parsing semantics.
+    m = _load_module()
+    source = inspect.getsource(m.parse_update_command)
+    assert "_action_hint_line" not in source
+    assert "render_query_results" not in source
+    source = inspect.getsource(m.update_entry_field)
+    assert "_action_hint_line" not in source
+    assert "render_query_results" not in source

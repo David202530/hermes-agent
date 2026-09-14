@@ -584,6 +584,56 @@ def render_duplicate_notice(duplicate_of: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Action hints for query results (Phase 2B-D)
+# ---------------------------------------------------------------------------
+#
+# Copy-paste-ready update commands shown under each open item in a
+# Backlog/My backlog query response, so a user can act without needing to
+# recall the exact command syntax. Derived ONLY from entry.id and
+# entry.status -- never from title/notes/any other field, so there is no
+# free-form text/path/content interpolation into the hint. DONE/CANCELLED
+# items show no hint (nothing further to do). This is a rendering-only
+# change: it does not touch parse_update_command(), update_entry_field(),
+# or any persistence/routing semantics.
+_ACTION_HINT_VERBS: dict[str, tuple[str, ...]] = {
+    # Not yet started -- offer Start as well as the terminal actions.
+    "BACKLOG": ("Start", "Done", "Cancel"),
+    "READY": ("Start", "Done", "Cancel"),
+    # Already active -- Start no longer applies, only the terminal actions.
+    "IN_PROGRESS": ("Done", "Cancel"),
+    "WAITING": ("Done", "Cancel"),
+    # DONE / CANCELLED intentionally absent: no hint line for closed items.
+}
+
+
+def _action_hint_line(entry_id: str, status: str) -> Optional[str]:
+    """One copy-paste-ready hint line for an open entry, or None for a
+    closed one (DONE/CANCELLED, or any unrecognized status)."""
+    verbs = _ACTION_HINT_VERBS.get(status.upper())
+    if not verbs:
+        return None
+    return "Reply: " + " · ".join(f"{verb} {entry_id}" for verb in verbs)
+
+
+def render_query_results(entries: list[BacklogEntry]) -> str:
+    """Render a backlog query's matched entries as a concise list: one
+    block per item (ID + title, priority/status, and -- for open items
+    only -- a copy-paste-ready action hint line). Read-only: this only
+    formats already-gathered data and never mutates anything."""
+    if not entries:
+        return "No matching backlog items."
+    blocks = []
+    for entry in entries:
+        lines = [f"{entry.id} — {entry.title}", f"{entry.priority} · {entry.status}"]
+        hint = _action_hint_line(entry.id, entry.status)
+        if hint:
+            lines.append("")
+            lines.append(hint)
+        blocks.append("\n".join(lines))
+    return "\n\n".join(blocks)
+
+
+# ---------------------------------------------------------------------------
 # CLI entry point -- the only impure surface besides capture()'s file I/O
 # ---------------------------------------------------------------------------
 
