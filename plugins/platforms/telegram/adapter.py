@@ -26,6 +26,43 @@ logger = logging.getLogger(__name__)
 from agent.deadline import run_bounded_async
 
 
+def _log_diagnostic_update_seen(marker: str, update: object) -> None:
+    """TEMPORARY (Telegram ingress investigation, to be removed once
+    resolved): log structural metadata for one Update at a named
+    observation boundary. Shared by both diagnostic points --
+    PTB_UPDATE_QUEUE_SEEN (PTB's own update_queue.put, before dispatch)
+    and TELEGRAM_RAW_UPDATE_SEEN (this adapter's earliest handler,
+    group 99) -- so the two boundaries are classified identically and
+    directly comparable by update_id.
+
+    Logs only: update_id, update type (message/edited_message/
+    callback_query/other), chat type, and whether text is present.
+    Never logs message text, names, chat titles, or the bot token.
+    Never raises -- a diagnostic must not be able to break ingress.
+    """
+    try:
+        if getattr(update, "message", None) is not None:
+            update_type = "message"
+        elif getattr(update, "edited_message", None) is not None:
+            update_type = "edited_message"
+        elif getattr(update, "callback_query", None) is not None:
+            update_type = "callback_query"
+        else:
+            update_type = "other"
+        diag_msg = getattr(update, "effective_message", None)
+        chat_type = (
+            getattr(getattr(diag_msg, "chat", None), "type", None)
+            if diag_msg is not None else None
+        )
+        has_text = bool(getattr(diag_msg, "text", None)) if diag_msg is not None else False
+        logger.info(
+            "%s update_id=%s type=%s chat_type=%s has_text=%s",
+            marker, getattr(update, "update_id", None), update_type, chat_type, has_text,
+        )
+    except Exception:
+        logger.debug("%s diagnostic failed", marker, exc_info=True)
+
+
 def _redact_telegram_error_text(error: object) -> str:
     """Redact secrets from Telegram transport errors before logging or returning them."""
     text = "" if error is None else str(error)
@@ -4165,31 +4202,10 @@ class TelegramAdapter(BasePlatformAdapter):
         # any Update reaches: this handler is registered in its own group
         # (99) specifically so it observes every update PTB dispatches
         # before any allowlist/batching/session/Capture-Router logic runs
-        # in the other handlers. Logs only structural metadata -- update_id,
-        # update type, chat type, and whether text is present -- never
-        # message text, names, chat titles, or the bot token. Wrapped so it
-        # can never alter control flow or raise into the update loop.
-        try:
-            if getattr(update, "message", None) is not None:
-                _update_type = "message"
-            elif getattr(update, "edited_message", None) is not None:
-                _update_type = "edited_message"
-            elif getattr(update, "callback_query", None) is not None:
-                _update_type = "callback_query"
-            else:
-                _update_type = "other"
-            _diag_msg = getattr(update, "effective_message", None)
-            _chat_type = (
-                getattr(getattr(_diag_msg, "chat", None), "type", None)
-                if _diag_msg is not None else None
-            )
-            _has_text = bool(getattr(_diag_msg, "text", None)) if _diag_msg is not None else False
-            logger.info(
-                "TELEGRAM_RAW_UPDATE_SEEN update_id=%s type=%s chat_type=%s has_text=%s",
-                getattr(update, "update_id", None), _update_type, _chat_type, _has_text,
-            )
-        except Exception:
-            logger.debug("TELEGRAM_RAW_UPDATE_SEEN diagnostic failed", exc_info=True)
+        # in the other handlers. See also PTB_UPDATE_QUEUE_SEEN (logged
+        # earlier still, at the point PTB enqueues the Update -- before
+        # handler dispatch) for the other half of this diagnostic pair.
+        _log_diagnostic_update_seen("TELEGRAM_RAW_UPDATE_SEEN", update)
 
         handler: Optional[Callable[[Dict[str, Any], Any], Awaitable[None]]] = getattr(
             self, "_platform_event_handler", None
@@ -4364,6 +4380,35 @@ class TelegramAdapter(BasePlatformAdapter):
             },
         }
 
+    def _instrument_update_queue_diagnostic(self, app) -> None:
+        """TEMPORARY (Telegram ingress investigation, to be removed once
+        resolved): log ``PTB_UPDATE_QUEUE_SEEN`` at the exact point PTB's
+        own ``Updater`` enqueues a fetched Update
+        (``await self.update_queue.put(update)`` in
+        ``telegram.ext._updater``) -- this is BEFORE any handler dispatch,
+        earlier than ``TELEGRAM_RAW_UPDATE_SEEN``. Answers whether PTB's
+        internal fetch loop ever hands off the Update at all.
+
+        Wraps the existing queue's bound ``put`` method with a thin
+        pass-through: logs, then awaits the ORIGINAL ``put`` with the
+        exact same, unmodified item. Never creates a second queue, never
+        touches ``get``/consumption, never changes what is enqueued or
+        its ordering. Idempotent -- rebuilding the app (the transient-init
+        path) gets a fresh queue and is wrapped again safely; wrapping an
+        already-wrapped queue is a no-op guarded by an attribute flag.
+        """
+        queue = getattr(app, "update_queue", None)
+        if queue is None or getattr(queue, "_hermes_diagnostic_wrapped", False):
+            return
+        original_put = queue.put
+
+        async def _diagnostic_put(item, *args, **kwargs):
+            _log_diagnostic_update_seen("PTB_UPDATE_QUEUE_SEEN", item)
+            return await original_put(item, *args, **kwargs)
+
+        queue.put = _diagnostic_put
+        queue._hermes_diagnostic_wrapped = True
+
     def _register_handlers(self, app) -> None:
         """Register every PTB handler on ``app``.
 
@@ -4372,6 +4417,12 @@ class TelegramAdapter(BasePlatformAdapter):
         the ``gateway_platform_event`` observer (group 99) in lockstep with the
         core handlers.
         """
+        # TEMPORARY DIAGNOSTIC -- see _instrument_update_queue_diagnostic's
+        # docstring. Must run before polling starts fetching, which it
+        # does here since _register_handlers is always called immediately
+        # after `app = builder.build()`, before polling begins.
+        self._instrument_update_queue_diagnostic(app)
+
         app.add_handler(TelegramMessageHandler(
             filters.TEXT & ~filters.COMMAND,
             self._handle_text_message
