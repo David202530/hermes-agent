@@ -4160,6 +4160,37 @@ class TelegramAdapter(BasePlatformAdapter):
         alongside, never displaces, the core handlers. Malformed updates and
         dispatch errors cannot raise into PTB's update loop.
         """
+        # TEMPORARY DIAGNOSTIC -- Telegram ingress investigation (to be
+        # removed once resolved). This is the earliest Hermes-owned point
+        # any Update reaches: this handler is registered in its own group
+        # (99) specifically so it observes every update PTB dispatches
+        # before any allowlist/batching/session/Capture-Router logic runs
+        # in the other handlers. Logs only structural metadata -- update_id,
+        # update type, chat type, and whether text is present -- never
+        # message text, names, chat titles, or the bot token. Wrapped so it
+        # can never alter control flow or raise into the update loop.
+        try:
+            if getattr(update, "message", None) is not None:
+                _update_type = "message"
+            elif getattr(update, "edited_message", None) is not None:
+                _update_type = "edited_message"
+            elif getattr(update, "callback_query", None) is not None:
+                _update_type = "callback_query"
+            else:
+                _update_type = "other"
+            _diag_msg = getattr(update, "effective_message", None)
+            _chat_type = (
+                getattr(getattr(_diag_msg, "chat", None), "type", None)
+                if _diag_msg is not None else None
+            )
+            _has_text = bool(getattr(_diag_msg, "text", None)) if _diag_msg is not None else False
+            logger.info(
+                "TELEGRAM_RAW_UPDATE_SEEN update_id=%s type=%s chat_type=%s has_text=%s",
+                getattr(update, "update_id", None), _update_type, _chat_type, _has_text,
+            )
+        except Exception:
+            logger.debug("TELEGRAM_RAW_UPDATE_SEEN diagnostic failed", exc_info=True)
+
         handler: Optional[Callable[[Dict[str, Any], Any], Awaitable[None]]] = getattr(
             self, "_platform_event_handler", None
         )
@@ -4362,6 +4393,28 @@ class TelegramAdapter(BasePlatformAdapter):
         # gateway_platform_event observer (see _on_platform_update); group 99 so
         # it observes alongside, never displaces, the core handlers.
         app.add_handler(TypeHandler(Update, self._on_platform_update), group=99)
+        # TEMPORARY DIAGNOSTIC -- Telegram ingress investigation (to be
+        # removed once resolved). No error handler was previously
+        # registered, so an exception raised inside a handler is caught by
+        # PTB's own internals and may only be logged under a PTB-internal
+        # logger namespace that isn't necessarily routed into Hermes's own
+        # log files -- i.e. genuinely invisible to us. This adds visibility
+        # only: exception class name + message, never update content.
+        app.add_error_handler(self._diagnostic_log_unhandled_error)
+
+    async def _diagnostic_log_unhandled_error(self, update, context) -> None:
+        """TEMPORARY diagnostic-only PTB error handler (Telegram ingress
+        investigation). Logs only the exception's class name and a
+        truncated message -- never update content, tokens, or personal
+        data. Does not change any error-handling behavior; PTB's own
+        default recovery (log and continue) still happens regardless of
+        this handler's presence."""
+        err = getattr(context, "error", None)
+        logger.error(
+            "TELEGRAM_DIAGNOSTIC_UNHANDLED_ERROR type=%s message=%s",
+            type(err).__name__ if err is not None else "unknown",
+            str(err)[:200] if err is not None else "",
+        )
 
     async def connect(self, *, is_reconnect: bool = False) -> bool:
         """Connect to Telegram via polling or webhook.
