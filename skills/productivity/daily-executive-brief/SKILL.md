@@ -29,6 +29,32 @@ triage (`google-workspace`'s own `references/daily-brief.md`), or anything
 that mutates state. This skill never approves, publishes, sends, or
 configures anything — see **Read-only guarantee** below.
 
+## ⚠️ NEVER return `[SILENT]` for this skill
+
+**This is an intentional, scoped exception to the generic cron-job
+convention** that lets a job respond with exactly `[SILENT]` to suppress
+delivery when "there is genuinely nothing new to report." That generic
+instruction does **NOT** apply here, no matter how it is worded in the
+prompt that invokes this skill:
+
+- Daily Executive Brief is a scheduled daily check-in David expects to
+  receive every single day it runs, healthy or not — silence is
+  indistinguishable from the job being broken, so it is never the
+  correct response.
+- If RED, ORANGE, or AUTOMATION HEALTH items exist: render and deliver
+  them per **Output Format** below.
+- If none exist: deliver exactly the fallback line —
+  `No critical actions require your attention today.` — never
+  `[SILENT]`, never an empty response, never nothing.
+
+A prior production run of this exact skill returned `[SILENT]` on a
+healthy day (following the generic cron convention) and delivered
+nothing to Telegram — confirmed via `agent.log`: `agent returned
+[SILENT] — skipping delivery`. This section exists specifically to
+prevent that recurring. See `tests/skills/test_daily_executive_brief_skill.py::TestNeverSilent`
+for the regression test guarding this rule, and its check that this
+section itself still exists in this file.
+
 ## Sources supported today
 
 Only sources Hermes can reliably reach without new integrations:
@@ -87,6 +113,11 @@ the procedure below and the output format do not change.
    ```
    No critical actions require your attention today.
    ```
+
+   Do **not** respond with `[SILENT]` here or anywhere else in this
+   skill — see **⚠️ NEVER return `[SILENT]` for this skill** above. An
+   empty brief is not "nothing to report"; it is a normal, expected,
+   positive result David should still see delivered.
 
 4. Deliver via whatever channel invoked this skill (Telegram for the
    scheduled job; the calling conversation otherwise). Do not deliver
@@ -163,3 +194,5 @@ ever-growing transcript the way the general conversation did.
 - [ ] No action was taken — this run only printed/delivered text.
 - [ ] Total rendered items ≤ 7.
 - [ ] If nothing needed attention, the exact fallback line was used.
+- [ ] The response was never `[SILENT]` — this skill always delivers
+      either the itemized brief or the fallback line.
