@@ -338,3 +338,56 @@ def test_cron_scheduler_assigns_a_fresh_session_id_per_run():
         "cron/scheduler.py no longer constructs a per-run session id the way "
         "the daily-executive-brief skill's session-isolation claim depends on"
     )
+
+
+# ---------------------------------------------------------------------------
+# 12. [SILENT] is forbidden for this skill (regression: a real production run
+# returned "[SILENT]" on a healthy day, following the generic cron-job
+# suppression convention, and Telegram received nothing -- see SKILL.md's
+# "NEVER return [SILENT] for this skill" section).
+# ---------------------------------------------------------------------------
+
+SKILL_MD_PATH = SKILL_DIR / "SKILL.md"
+
+
+class TestNeverSilent:
+    def test_healthy_input_renders_the_exact_fallback_text(self):
+        m = _load_module()
+        classified = {"red": [], "orange": [], "automation_health": [], "sources_unknown": []}
+        assert m.render(classified) == "No critical actions require your attention today."
+
+    def test_render_output_is_never_the_literal_string_silent(self):
+        # Across every classify() shape this skill can produce -- empty,
+        # one item per bucket, and a full 7-item truncation -- render()
+        # must never itself produce the literal token the generic cron
+        # convention looks for.
+        m = _load_module()
+        scenarios = [
+            {"red": [], "orange": [], "automation_health": [], "sources_unknown": []},
+            {"red": [{"text": "x", "next_action": None}], "orange": [], "automation_health": [], "sources_unknown": []},
+            {"red": [], "orange": [{"text": "x", "next_action": None}], "automation_health": [], "sources_unknown": []},
+            {"red": [], "orange": [], "automation_health": [{"text": "x", "next_action": None}], "sources_unknown": []},
+        ]
+        for classified in scenarios:
+            output = m.render(classified)
+            assert output != "[SILENT]"
+            assert "[SILENT]" not in output
+
+    def test_skill_md_explicitly_forbids_silent(self):
+        # Static guard: a future prompt/procedure edit to SKILL.md cannot
+        # silently drop this rule without failing this test. Checks both
+        # the dedicated warning section and the inline reminder at the
+        # exact point (Procedure step 3) where the fallback line is chosen.
+        source = SKILL_MD_PATH.read_text(encoding="utf-8")
+        assert "NEVER return `[SILENT]`" in source
+        assert "does **NOT** apply here" in source or "does NOT apply here" in source
+        assert "Do **not** respond with `[SILENT]`" in source
+        # The rule must appear before the "Sources supported today" section
+        # (i.e. near the top of the execution-relevant procedure, not
+        # buried at the end of the file).
+        silent_rule_pos = source.index("NEVER return `[SILENT]`")
+        sources_section_pos = source.index("## Sources supported today")
+        assert silent_rule_pos < sources_section_pos, (
+            "the no-[SILENT] rule must appear before 'Sources supported "
+            "today', i.e. near the top of the skill, not buried at the end"
+        )
