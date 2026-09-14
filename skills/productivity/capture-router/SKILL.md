@@ -131,9 +131,26 @@ for <project>` — run:
 python3 skills/productivity/capture-router/scripts/capture_router.py query "<raw message>"
 ```
 
-Render the returned entries as a short list (ID, Title, Priority,
-Status — one line each). This call **never** writes to `BACKLOG.md`.
-If the list is empty, say so in one line; do not invent items.
+Render the returned `entries` the same way `scripts/capture_router.py`'s
+`render_query_results()` does — this is the deterministic reference
+implementation; reproduce its output exactly rather than improvising a
+different layout:
+
+```
+BL-0002 — Test Capture Router production persistence
+MEDIUM · BACKLOG
+
+Reply: Start BL-0002 · Done BL-0002 · Cancel BL-0002
+```
+
+One block per item, separated by a blank line. The action-hint line
+(`Reply: ...`) is derived **only** from the item's ID and status —
+`BACKLOG`/`READY` → `Start`/`Done`/`Cancel`; `IN_PROGRESS`/`WAITING` →
+`Done`/`Cancel`; `DONE`/`CANCELLED` → no hint line at all (nothing
+further to do). Never substitute the item's title, notes, or any other
+field into the hint. This call **never** writes to `BACKLOG.md`. If the
+list is empty, say so in one line (`No matching backlog items.`); do
+not invent items.
 
 ## Procedure — update commands
 
