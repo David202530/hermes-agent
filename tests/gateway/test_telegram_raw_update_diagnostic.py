@@ -197,3 +197,100 @@ def test_should_process_message_and_auth_check_untouched():
     source = inspect.getsource(TelegramAdapter._handle_text_message)
     assert "TELEGRAM_RAW_UPDATE_SEEN" not in source
     assert "TELEGRAM_DIAGNOSTIC" not in source
+
+
+# ---------------------------------------------------------------------------
+# PTB update_queue diagnostic (PTB_UPDATE_QUEUE_SEEN)
+# ---------------------------------------------------------------------------
+
+class _FakeQueue:
+    """Minimal asyncio.Queue-shaped stand-in: only `put` is exercised by
+    the diagnostic wrapper, and only `put`/`_hermes_diagnostic_wrapped`
+    need to behave like real attributes."""
+
+    def __init__(self):
+        self.items: list = []
+
+    async def put(self, item, *args, **kwargs):
+        self.items.append(item)
+
+
+def test_queue_diagnostic_fires_once_per_enqueued_update(caplog):
+    a = _adapter()
+    app = SimpleNamespace(update_queue=_FakeQueue())
+
+    with caplog.at_level(logging.INFO):
+        a._instrument_update_queue_diagnostic(app)
+        asyncio.run(app.update_queue.put(_text_message_update("hi")))
+
+    matches = [r for r in caplog.records if "PTB_UPDATE_QUEUE_SEEN" in r.message]
+    assert len(matches) == 1
+    assert "type=message" in matches[0].message
+    assert "chat_type=private" in matches[0].message
+    assert "has_text=True" in matches[0].message
+
+
+def test_queue_diagnostic_delivers_update_unchanged():
+    # The exact same object must still reach the queue's underlying store
+    # -- the wrapper must not clone, replace, or drop it.
+    a = _adapter()
+    fake_queue = _FakeQueue()
+    app = SimpleNamespace(update_queue=fake_queue)
+    a._instrument_update_queue_diagnostic(app)
+
+    original_update = _text_message_update("unchanged")
+    asyncio.run(app.update_queue.put(original_update))
+
+    assert len(fake_queue.items) == 1
+    assert fake_queue.items[0] is original_update
+
+
+def test_queue_diagnostic_never_logs_message_text(caplog):
+    a = _adapter()
+    app = SimpleNamespace(update_queue=_FakeQueue())
+    a._instrument_update_queue_diagnostic(app)
+
+    secret_text = "queue-level secret that must never be logged"
+    with caplog.at_level(logging.INFO):
+        asyncio.run(app.update_queue.put(_text_message_update(secret_text)))
+
+    for record in caplog.records:
+        assert secret_text not in record.message
+
+
+def test_queue_diagnostic_is_idempotent_no_double_wrap(caplog):
+    # Wrapping an already-wrapped queue must be a no-op -- otherwise a
+    # rebuild path could stack wrappers and double-log (or, if this were
+    # a real consumer instead of a pass-through wrapper, double-consume).
+    a = _adapter()
+    queue = _FakeQueue()
+    app = SimpleNamespace(update_queue=queue)
+
+    a._instrument_update_queue_diagnostic(app)
+    a._instrument_update_queue_diagnostic(app)  # second call, same queue
+
+    with caplog.at_level(logging.INFO):
+        asyncio.run(app.update_queue.put(_text_message_update("x")))
+
+    matches = [r for r in caplog.records if "PTB_UPDATE_QUEUE_SEEN" in r.message]
+    assert len(matches) == 1  # not double-logged
+    assert len(queue.items) == 1  # not double-enqueued either
+
+
+def test_queue_diagnostic_creates_no_second_consumer():
+    # Static guard: the wrapper must never call .get()/.get_nowait() --
+    # that would make it a competing consumer instead of a pass-through
+    # observer on the put path.
+    source = inspect.getsource(TelegramAdapter._instrument_update_queue_diagnostic)
+    assert ".get(" not in source
+    assert ".get_nowait(" not in source
+    assert "asyncio.Queue(" not in source  # never constructs a second queue
+
+
+def test_register_handlers_instruments_queue_before_registering():
+    source = inspect.getsource(TelegramAdapter._register_handlers)
+    assert "_instrument_update_queue_diagnostic(app)" in source
+    # Must run before any add_handler call, not after.
+    queue_pos = source.index("_instrument_update_queue_diagnostic(app)")
+    handler_pos = source.index("add_handler(")
+    assert queue_pos < handler_pos
