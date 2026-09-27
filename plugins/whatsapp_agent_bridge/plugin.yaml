@@ -1,0 +1,16 @@
+name: whatsapp-agent-bridge
+version: 0.1.0
+description: "WhatsApp Agent bridge -- 10 tools that let David manage pending WhatsApp replies (draft, approve, send, snooze, dismiss) through this Hermes conversation. Every tool forwards to the WhatsApp Agent's own Phase 5 opaque-token callback (repo: D:\\AI Agent\\Whatsapp AI); no WhatsApp domain logic, drafting, approval, or send logic lives here -- the Agent remains the sole authority. Requires WHATSAPP_AGENT_BRIDGE_ENABLED / _SHARED_SECRET / _CALLBACK_URL / _AUTHORIZED_USER_ID -- inert (tools registered but dispatch refused, ingress listener not started) until all four are configured. Disabled by default."
+author: "David Mamrikishvili"
+kind: backend
+provides_tools:
+  - whatsapp_agent_list_pending
+  - whatsapp_agent_get_current
+  - whatsapp_agent_draft_reply
+  - whatsapp_agent_regenerate_draft
+  - whatsapp_agent_approve_draft
+  - whatsapp_agent_send_now
+  - whatsapp_agent_cancel_send
+  - whatsapp_agent_remind_later
+  - whatsapp_agent_dismiss
+  - whatsapp_agent_resolve_unknown_send
